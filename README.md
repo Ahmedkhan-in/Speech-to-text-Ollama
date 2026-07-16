@@ -82,6 +82,8 @@ Streamlit UI
 
 ## Demo
 
-![Home](assets/home.png)
+![Home](assets/Home.png)
+
 ![Transcription](assets/Transcription.png)
-![Summary](assets/summary.png)
+
+![Summary](assets/Summary.png)
