@@ -1,7 +1,8 @@
+import base64
 import os
 from pathlib import Path
-
 import streamlit as st
+import streamlit.components.v1 as components
 
 from pipeline import extract_summary, save_audio_bytes, transcribe_audio
 from models import ConversationSummary, TranscriptionResult
@@ -34,21 +35,43 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
+def audio_recorder(key=None):
+    parent_dir = os.path.dirname(os.path.abspath(__file__))
+    component_dir = os.path.join(parent_dir, "audio_recorder_component")
+    _component_func = components.declare_component("audio_recorder", path=component_dir)
+    return _component_func(key=key)
+
+
 record_tab, upload_tab = st.tabs(["Record", "Upload"])
 audio_bytes: bytes | None = None
 audio_suffix = ".wav"
 
 with record_tab:
-    recording = st.audio_input("Record a conversation")
-    if recording is not None:
-        audio_bytes = recording.getvalue()
-        audio_suffix = ".wav"
+    audio_data = audio_recorder(key="custom_audio_recorder")
 
 with upload_tab:
     uploaded = st.file_uploader("Upload audio", type=["wav", "mp3", "m4a"])
-    if uploaded is not None:
-        audio_bytes = uploaded.getvalue()
-        audio_suffix = Path(uploaded.name).suffix or ".wav"
+
+if uploaded is not None:
+    audio_bytes = uploaded.getvalue()
+    audio_suffix = Path(uploaded.name).suffix or ".wav"
+else:
+    if audio_data and audio_data.get("status") == "stopped":
+        audio_bytes = base64.b64decode(audio_data["audio_base64"])
+        mime_type = audio_data.get("audio_type", "")
+        # ponytail: extract proper extension from mime type
+        if "mp4" in mime_type:
+            audio_suffix = ".mp4"
+        elif "ogg" in mime_type:
+            audio_suffix = ".ogg"
+        elif "wav" in mime_type:
+            audio_suffix = ".wav"
+        else:
+            audio_suffix = ".webm"
+
+
+
 
 
 def format_timestamp(seconds: float) -> str:

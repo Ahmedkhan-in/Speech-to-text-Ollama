@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root {
+      --primary: var(--st-primary-color, #ff4b4b);
+      --bg: var(--st-background-color, #ffffff);
+      --sec-bg: var(--st-secondary-background-color, #f0f2f6);
+      --text: var(--st-text-color, #31333f);
+      --border: var(--st-border-color, #e0e0e0);
+      --font: var(--st-font, sans-serif);
+    }
+    body {
+      margin: 0;
+      padding: 6px 0;
+      font-family: var(--font);
+      background-color: transparent;
+      color: var(--text);
+      overflow: hidden;
+    }
+    .recorder-container {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 16px;
+      background: var(--sec-bg);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .status-container {
+      display: flex;
+      align-items: center;
+      font-size: 14px;
+      font-weight: 500;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 8px 16px;
+      font-size: 14px;
+      font-weight: 500;
+      border-radius: 6px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: all 0.15s ease-in-out;
+      font-family: var(--font);
+    }
+    .btn-primary {
+      background-color: var(--primary);
+      color: white;
+    }
+    .btn-primary:hover {
+      opacity: 0.9;
+    }
+    .btn-secondary {
+      background-color: transparent;
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .btn-secondary:hover {
+      background-color: rgba(0, 0, 0, 0.05);
+    }
+    .btn-danger {
+      background-color: transparent;
+      color: #ef4444;
+      border-color: rgba(239, 68, 68, 0.2);
+    }
+    .btn-danger:hover {
+      background-color: rgba(239, 68, 68, 0.08);
+    }
+    .timer {
+      font-size: 14px;
+      font-variant-numeric: tabular-nums;
+      font-weight: 600;
+      margin-left: 8px;
+      color: var(--text);
+      opacity: 0.8;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: #ef4444;
+      display: inline-block;
+      margin-right: 8px;
+      animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse {
+      0% { transform: scale(0.95); opacity: 0.6; }
+      50% { transform: scale(1.1); opacity: 1; }
+      100% { transform: scale(0.95); opacity: 0.6; }
+    }
+    audio {
+      height: 36px;
+      border-radius: 6px;
+      flex-grow: 1;
+      max-width: 320px;
+    }
+    .hidden {
+      display: none !important;
+    }
+  </style>
+</head>
+<body>
+  <div class="recorder-container">
+    <!-- Status / Audio Player -->
+    <div id="leftArea" class="status-container">
+      <span id="statusDot" class="status-dot hidden"></span>
+      <span id="statusText">Ready to record</span>
+      <span id="timer" class="timer hidden">00:00</span>
+    </div>
+    <audio id="audioPlayback" class="hidden" controls></audio>
+    
+    <!-- Controls -->
+    <div id="controlsArea" style="display: flex; gap: 8px;">
+      <button id="recordBtn" class="btn btn-primary">🎤 Record</button>
+      <button id="pauseBtn" class="btn btn-secondary hidden">⏸️ Pause</button>
+      <button id="resumeBtn" class="btn btn-primary hidden">▶️ Resume</button>
+      <button id="stopBtn" class="btn btn-secondary hidden">⏹️ Stop</button>
+      <button id="discardBtn" class="btn btn-danger hidden">🗑️ Discard</button>
+    </div>
+  </div>
+
+  <script>
+    let mediaRecorder;
+    let audioChunks = [];
+    let stream;
+    let startTime;
+    let elapsedTime = 0;
+    let timerInterval;
+
+    const recordBtn = document.getElementById('recordBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
+    const resumeBtn = document.getElementById('resumeBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const discardBtn = document.getElementById('discardBtn');
+    const statusDot = document.getElementById('statusDot');
+    const statusText = document.getElementById('statusText');
+    const timer = document.getElementById('timer');
+    const audioPlayback = document.getElementById('audioPlayback');
+    const leftArea = document.getElementById('leftArea');
+
+    function sendToStreamlit(type, data) {
+      const msg = Object.assign({
+        isStreamlitMessage: true,
+        type: type,
+      }, data);
+      window.parent.postMessage(msg, "*");
+    }
+
+    function updateTimer() {
+      const now = Date.now();
+      const totalSeconds = Math.floor((elapsedTime + (now - startTime)) / 1000);
+      const mins = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
+      const secs = String(totalSeconds % 60).padStart(2, '0');
+      timer.textContent = `${mins}:${secs}`;
+    }
+
+    function startTimer() {
+      startTime = Date.now();
+      timer.classList.remove('hidden');
+      timerInterval = setInterval(updateTimer, 500);
+    }
+
+    function pauseTimer() {
+      clearInterval(timerInterval);
+      elapsedTime += Date.now() - startTime;
+    }
+
+    function stopTimer() {
+      clearInterval(timerInterval);
+      elapsedTime = 0;
+      timer.classList.add('hidden');
+      timer.textContent = "00:00";
+    }
+
+    async function startRecording() {
+      try {
+        const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4', 'audio/wav']
+          .find(type => MediaRecorder.isTypeSupported(type)) || '';
+          
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = mimeType 
+          ? new MediaRecorder(stream, { mimeType }) 
+          : new MediaRecorder(stream);
+          
+        audioChunks = [];
+        
+        mediaRecorder.ondataavailable = event => {
+          if (event.data && event.data.size > 0) {
+            audioChunks.push(event.data);
+          }
+        };
+
+        mediaRecorder.onstop = () => {
+          if (audioChunks.length === 0) return;
+          const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+          const audioUrl = URL.createObjectURL(audioBlob);
+          
+          // Show audio player to review voice
+          leftArea.classList.add('hidden');
+          audioPlayback.src = audioUrl;
+          audioPlayback.classList.remove('hidden');
+          
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const base64data = reader.result.split(',')[1];
+            sendToStreamlit("streamlit:setComponentValue", {
+              value: {
+                status: 'stopped',
+                audio_base64: base64data,
+                audio_type: mediaRecorder.mimeType || 'audio/webm'
+              }
+            });
+          };
+          reader.readAsDataURL(audioBlob);
+          cleanupStream();
+        };
+
+        mediaRecorder.start();
+        startTimer();
+        
+        audioPlayback.classList.add('hidden');
+        leftArea.classList.remove('hidden');
+        statusDot.classList.remove('hidden');
+        statusText.textContent = "Recording...";
+        
+        recordBtn.classList.add('hidden');
+        pauseBtn.classList.remove('hidden');
+        resumeBtn.classList.add('hidden');
+        stopBtn.classList.remove('hidden');
+        discardBtn.classList.remove('hidden');
+      } catch (err) {
+        console.error("Error accessing microphone:", err);
+        statusText.textContent = "Mic Error: " + err.message;
+      }
+    }
+
+    function pauseRecording() {
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.pause();
+        pauseTimer();
+        statusDot.classList.add('hidden');
+        statusText.textContent = "Paused";
+        
+        pauseBtn.classList.add('hidden');
+        resumeBtn.classList.remove('hidden');
+      }
+    }
+
+    function resumeRecording() {
+      if (mediaRecorder && mediaRecorder.state === 'paused') {
+        mediaRecorder.resume();
+        startTimer();
+        statusDot.classList.remove('hidden');
+        statusText.textContent = "Recording...";
+        
+        resumeBtn.classList.add('hidden');
+        pauseBtn.classList.remove('hidden');
+      }
+    }
+
+    function stopRecording() {
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+        stopTimer();
+        
+        pauseBtn.classList.add('hidden');
+        resumeBtn.classList.add('hidden');
+        stopBtn.classList.add('hidden');
+        discardBtn.classList.remove('hidden');
+      }
+    }
+
+    function discardRecording() {
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.onstop = null; // discard callbacks
+        mediaRecorder.stop();
+      }
+      stopTimer();
+      cleanupStream();
+      
+      audioPlayback.classList.add('hidden');
+      audioPlayback.src = '';
+      
+      leftArea.classList.remove('hidden');
+      statusDot.classList.add('hidden');
+      statusText.textContent = "Discarded";
+      
+      recordBtn.classList.remove('hidden');
+      pauseBtn.classList.add('hidden');
+      resumeBtn.classList.add('hidden');
+      stopBtn.classList.add('hidden');
+      discardBtn.classList.add('hidden');
+
+      sendToStreamlit("streamlit:setComponentValue", {
+        value: { status: 'deleted' }
+      });
+      
+      setTimeout(() => {
+        if (statusText.textContent === "Discarded") {
+          statusText.textContent = "Ready to record";
+        }
+      }, 1500);
+    }
+
+    function cleanupStream() {
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+        stream = null;
+      }
+    }
+
+    // Monitor for recording state to show Stop button only when there is something recorded
+    setInterval(() => {
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        if (audioChunks.length > 0 || elapsedTime > 500 || (startTime && Date.now() - startTime > 500)) {
+          stopBtn.classList.remove('hidden');
+        }
+      }
+    }, 200);
+
+    recordBtn.onclick = startRecording;
+    pauseBtn.onclick = pauseRecording;
+    resumeBtn.onclick = resumeRecording;
+    stopBtn.onclick = stopRecording;
+    discardBtn.onclick = discardRecording;
+
+    // Send component ready signals
+    sendToStreamlit("streamlit:componentReady", { apiVersion: 1 });
+    sendToStreamlit("streamlit:setFrameHeight", { height: 72 });
+  </script>
+</body>
+</html>
