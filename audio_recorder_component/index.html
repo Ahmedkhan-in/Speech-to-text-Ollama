@@ -181,11 +181,22 @@
       try {
         const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4', 'audio/wav']
           .find(type => MediaRecorder.isTypeSupported(type)) || '';
-          
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        mediaRecorder = mimeType 
-          ? new MediaRecorder(stream, { mimeType }) 
-          : new MediaRecorder(stream);
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            channelCount: 1,
+            sampleRate: 48000
+          }
+        });
+        const recorderOptions = {
+          audioBitsPerSecond: 128000
+        };
+        if (mimeType) {
+          recorderOptions.mimeType = mimeType;
+        }
+        mediaRecorder = new MediaRecorder(stream, recorderOptions);
           
         audioChunks = [];
         

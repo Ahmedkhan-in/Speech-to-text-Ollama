@@ -3,10 +3,18 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
+class Word(BaseModel):
+    word: str
+    start: float
+    end: float
+    probability: float
+
+
 class Segment(BaseModel):
     start: float
     end: float
     text: str
+    words: Optional[list[Word]] = None
 
 
 class TranscriptionResult(BaseModel):

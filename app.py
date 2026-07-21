@@ -35,6 +35,19 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+language_option = st.selectbox(
+    "Select Language",
+    options=["Auto Detect", "English", "Urdu"],
+    index=0,
+    help="Explicitly override the speech language or let Whisper auto-detect."
+)
+language_map = {
+    "Auto Detect": None,
+    "English": "en",
+    "Urdu": "ur"
+}
+selected_language = language_map[language_option]
+
 
 def audio_recorder(key=None):
     parent_dir = os.path.dirname(os.path.abspath(__file__))
@@ -69,7 +82,6 @@ else:
             audio_suffix = ".wav"
         else:
             audio_suffix = ".webm"
-
 
 
 
@@ -118,7 +130,7 @@ if st.button("Transcribe and Analyze", type="primary", use_container_width=True)
         try:
             temp_path = save_audio_bytes(audio_bytes, audio_suffix)
             with st.spinner("Transcribing audio..."):
-                transcription = transcribe_audio(temp_path)
+                transcription = transcribe_audio(temp_path, language=selected_language)
             with st.spinner("Extracting structured insights..."):
                 summary = extract_summary(transcription.text)
 
