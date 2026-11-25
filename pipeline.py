@@ -3,6 +3,7 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any, Callable
 
 import requests
 from faster_whisper import WhisperModel, decode_audio
@@ -12,8 +13,35 @@ from models import ConversationSummary, Segment, TranscriptionResult, Word
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma3:4b")
+OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "30m")
 
 _whisper: WhisperModel | None = None
+
+# Optional progress reporting. Callers pass on_progress(event, data) to watch the
+# pipeline work; events are:
+#   "step_start" {key, label}            a stage began
+#   "step_done"  {key, detail}           a stage finished (detail may be "")
+#   "segment"    {key, text, end, duration, pass_index, pass_count}
+#                                        one transcript segment was decoded
+#   "info"       {message}               a notable decision (e.g. dual-language run)
+ProgressCallback = Callable[[str, dict[str, Any]], None]
+
+LANGUAGE_NAMES = {"en": "English", "ur": "Urdu"}
+
+
+def _emit(on_progress: ProgressCallback | None, event: str, **data: Any) -> None:
+    if on_progress is None:
+        return
+    try:
+        on_progress(event, data)
+    except Exception:
+        # Progress reporting must never break transcription.
+        pass
+
+
+def _format_duration(seconds: float) -> str:
+    minutes, secs = divmod(int(round(seconds)), 60)
+    return f"{minutes}:{secs:02d}"
 
 
 def _get_whisper() -> WhisperModel:
@@ -68,11 +96,56 @@ def preprocess_audio(input_path: str | Path) -> str | Path:
     return input_path
 
 
-def transcribe_audio(audio_path: str | Path, language: str | None = None) -> TranscriptionResult:
+def _run_pass(
+    model: WhisperModel,
+    audio_path: str | Path,
+    language: str,
+    prompt: str,
+    opts: dict,
+    on_progress: ProgressCallback | None,
+    key: str,
+    label: str,
+    pass_index: int = 1,
+    pass_count: int = 1,
+) -> list:
+    """Run one Whisper pass, consuming segments as they are decoded so progress can be reported."""
+    _emit(on_progress, "step_start", key=key, label=label)
+    segments_iter, info = model.transcribe(
+        str(audio_path), language=language, initial_prompt=prompt, **opts
+    )
+    segments = []
+    for seg in segments_iter:
+        segments.append(seg)
+        _emit(
+            on_progress, "segment",
+            key=key, text=seg.text.strip(), end=seg.end, duration=info.duration,
+            pass_index=pass_index, pass_count=pass_count,
+        )
+    _emit(on_progress, "step_done", key=key, detail=f"{len(segments)} segments")
+    return segments
+
+
+def transcribe_audio(
+    audio_path: str | Path,
+    language: str | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> TranscriptionResult:
+    _emit(on_progress, "step_start", key="preprocess",
+          label="Cleaning audio with FFmpeg (mono 16 kHz, rumble/hiss filters, loudness)")
     converted_path = preprocess_audio(audio_path)
+    if converted_path == audio_path:
+        _emit(on_progress, "step_done", key="preprocess", detail="FFmpeg failed, using original audio")
+    else:
+        audio_seconds = max(os.path.getsize(converted_path) - 44, 0) / 32000  # 16 kHz * 16-bit mono
+        _emit(on_progress, "step_done", key="preprocess",
+              detail=f"{_format_duration(audio_seconds)} of audio")
     try:
+        already_loaded = _whisper is not None
+        _emit(on_progress, "step_start", key="model", label=f"Loading Whisper '{WHISPER_MODEL}' model")
         model = _get_whisper()
-        
+        _emit(on_progress, "step_done", key="model",
+              detail="already in memory" if already_loaded else "loaded")
+
         # Optimize transcription parameters for maximum accuracy:
         # - beam_size=5: recommended search depth balancing accuracy and latency.
         # - temperature=0.0: deterministic greedy decoding for consistency.
@@ -101,13 +174,17 @@ def transcribe_audio(audio_path: str | Path, language: str | None = None) -> Tra
         
         if language is None:
             # Auto-detect mode. Optimize Urdu detection specifically to combat English bias.
+            _emit(on_progress, "step_start", key="detect", label="Detecting spoken language")
             try:
                 audio_data = decode_audio(str(converted_path), sampling_rate=16000)
                 detected_lang, lang_prob, all_probs = model.detect_language(audio_data)
+                _emit(on_progress, "step_done", key="detect",
+                      detail=f"{LANGUAGE_NAMES.get(detected_lang, detected_lang)} ({lang_prob:.0%} confident)")
             except Exception:
                 # Safe fallback if audio decoding fails.
                 detected_lang, lang_prob, all_probs = "en", 1.0, [("en", 1.0)]
-            
+                _emit(on_progress, "step_done", key="detect", detail="detection failed, assuming English")
+
             probs_dict = {l: p for l, p in all_probs}
             en_prob = probs_dict.get("en", 0.0)
             ur_prob = probs_dict.get("ur", 0.0)
@@ -116,29 +193,30 @@ def transcribe_audio(audio_path: str | Path, language: str | None = None) -> Tra
             # or if the detected language is English with low confidence (< 0.85),
             # run BOTH English and Urdu transcriptions and select the higher confidence result.
             if (ur_prob >= 0.02) or (detected_lang == "en" and lang_prob < 0.85) or (detected_lang not in ("en", "ur")):
+                _emit(on_progress, "info",
+                      message="Language is uncertain, so transcribing in both Urdu and English "
+                              "and keeping the more confident result.")
                 # Urdu run
                 try:
-                    ur_segments_iter, _ur_info = model.transcribe(
-                        str(converted_path),
-                        language="ur",
-                        initial_prompt=prompt_ur,
-                        **transcribe_opts
+                    ur_segments = _run_pass(
+                        model, converted_path, "ur", prompt_ur, transcribe_opts, on_progress,
+                        key="transcribe_ur", label="Transcribing, pass 1 of 2 (Urdu)",
+                        pass_index=1, pass_count=2,
                     )
-                    ur_segments = list(ur_segments_iter)
                 except Exception:
                     ur_segments = []
-                
+                    _emit(on_progress, "step_done", key="transcribe_ur", detail="failed, skipped")
+
                 # English run
                 try:
-                    en_segments_iter, _en_info = model.transcribe(
-                        str(converted_path),
-                        language="en",
-                        initial_prompt=prompt_en,
-                        **transcribe_opts
+                    en_segments = _run_pass(
+                        model, converted_path, "en", prompt_en, transcribe_opts, on_progress,
+                        key="transcribe_en", label="Transcribing, pass 2 of 2 (English)",
+                        pass_index=2, pass_count=2,
                     )
-                    en_segments = list(en_segments_iter)
                 except Exception:
                     en_segments = []
+                    _emit(on_progress, "step_done", key="transcribe_en", detail="failed, skipped")
                 
                 # Scoring function based on average log probability weighted by segment duration
                 def get_score(segs):
@@ -157,28 +235,28 @@ def transcribe_audio(audio_path: str | Path, language: str | None = None) -> Tra
                 
                 if ur_score > en_score and ur_score > -999.0:
                     chosen_segments = ur_segments
+                    kept = "Urdu"
                 else:
                     chosen_segments = en_segments
+                    kept = "English"
+                _emit(on_progress, "info",
+                      message=f"Kept the {kept} transcript (confidence Urdu {ur_score:.2f} "
+                              f"vs English {en_score:.2f}, higher is better).")
             else:
                 # Highly confident language detection
                 prompt = prompt_ur if detected_lang == "ur" else prompt_en
-                segments_iter, _info = model.transcribe(
-                    str(converted_path),
-                    language=detected_lang,
-                    initial_prompt=prompt,
-                    **transcribe_opts
+                chosen_segments = _run_pass(
+                    model, converted_path, detected_lang, prompt, transcribe_opts, on_progress,
+                    key="transcribe",
+                    label=f"Transcribing ({LANGUAGE_NAMES.get(detected_lang, detected_lang)})",
                 )
-                chosen_segments = list(segments_iter)
         else:
             # Explicit language override chosen by the user
             prompt = prompt_ur if language == "ur" else prompt_en
-            segments_iter, _info = model.transcribe(
-                str(converted_path),
-                language=language,
-                initial_prompt=prompt,
-                **transcribe_opts
+            chosen_segments = _run_pass(
+                model, converted_path, language, prompt, transcribe_opts, on_progress,
+                key="transcribe", label=f"Transcribing ({LANGUAGE_NAMES.get(language, language)})",
             )
-            chosen_segments = list(segments_iter)
         
         segments: list[Segment] = []
         parts: list[str] = []
@@ -225,13 +303,20 @@ def _build_prompt(transcript: str, strict: bool = False) -> str:
     )
 
 
-def _call_ollama(prompt: str, json_format: bool = False) -> str:
+def _call_ollama(prompt: str, json_format: bool = False, schema: dict | None = None) -> str:
     payload = {
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False,
+        # Keep the model in memory between requests (Ollama's default is 5 minutes),
+        # so consecutive runs skip reloading it from disk.
+        "keep_alive": OLLAMA_KEEP_ALIVE,
     }
-    if json_format:
+    if schema is not None:
+        # Structured output: Ollama constrains generation to this JSON schema,
+        # so every required field is filled on the first attempt.
+        payload["format"] = schema
+    elif json_format:
         payload["format"] = "json"
     response = requests.post(
         f"{OLLAMA_BASE_URL}/api/generate",
@@ -262,14 +347,33 @@ def cleanup_transcript(transcript: str) -> str:
     return transcript
 
 
-def extract_summary(transcript: str) -> ConversationSummary:
+def extract_summary(transcript: str, on_progress: ProgressCallback | None = None) -> ConversationSummary:
+    _emit(on_progress, "step_start", key="summary",
+          label=f"Extracting insights with {OLLAMA_MODEL} (summary, key points, action items)")
+    # First attempt: schema-constrained output (Ollama structured outputs). Without the
+    # schema, gemma3 in plain JSON mode often replies with an empty "{}".
+    # Fallback: the older strict-prompt JSON mode, in case the server lacks schema support.
+    attempts = [
+        {"strict": False, "schema": ConversationSummary.model_json_schema()},
+        {"strict": True, "schema": None},
+    ]
     last_error: Exception | None = None
-    for strict in (False, True):
+    for i, attempt in enumerate(attempts):
         try:
-            raw = _call_ollama(_build_prompt(transcript, strict=strict), json_format=True)
-            return ConversationSummary.model_validate_json(raw)
+            raw = _call_ollama(
+                _build_prompt(transcript, strict=attempt["strict"]),
+                json_format=True,
+                schema=attempt["schema"],
+            )
+            summary = ConversationSummary.model_validate_json(raw)
+            _emit(on_progress, "step_done", key="summary",
+                  detail=f"{len(summary.key_points)} key points, {len(summary.action_items)} action items")
+            return summary
         except Exception as exc:
             last_error = exc
+            if i < len(attempts) - 1:
+                _emit(on_progress, "info",
+                      message="The model's reply didn't match the expected format, retrying with a stricter prompt.")
     raise ValueError(f"Could not parse structured summary: {last_error}")
 
 
@@ -279,8 +383,12 @@ def save_audio_bytes(data: bytes, suffix: str) -> str:
         return tmp.name
 
 
-def run_pipeline(audio_path: str | Path, language: str | None = None) -> tuple[TranscriptionResult, ConversationSummary]:
-    transcription = transcribe_audio(audio_path, language=language)
-    summary = extract_summary(transcription.text)
+def run_pipeline(
+    audio_path: str | Path,
+    language: str | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> tuple[TranscriptionResult, ConversationSummary]:
+    transcription = transcribe_audio(audio_path, language=language, on_progress=on_progress)
+    summary = extract_summary(transcription.text, on_progress=on_progress)
     return transcription, summary
 
