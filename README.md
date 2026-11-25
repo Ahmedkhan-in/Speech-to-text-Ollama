@@ -54,6 +54,7 @@ You can customize the execution behavior using the following environment variabl
 | `WHISPER_MODEL` | `small` | Whisper model size (`tiny`, `base`, `small`, `medium`, `large-v3`). `small` is recommended for 4-core mobile CPUs. |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | The endpoint URL where Ollama is running. |
 | `OLLAMA_MODEL` | `gemma3:4b` | The model name in Ollama used for summarization. |
+| `OLLAMA_KEEP_ALIVE` | `30m` | How long Ollama keeps the model loaded between requests, so repeat runs skip reloading it. |
 
 ---
 
