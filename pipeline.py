@@ -59,15 +59,18 @@ def preprocess_audio(input_path: str | Path) -> str | Path:
     output_path = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
     
     # Try advanced filters: highpass at 80Hz to remove mic rumble, lowpass at 8000Hz to remove hiss,
-    # and speechnorm for speech-specific loudness normalization.
+    # and loudnorm (EBU R128) to bring every recording to a consistent loudness.
+    # Do not use speechnorm here: on real recordings it raises the background noise between
+    # words to the level of the speech, the VAD then treats most of the call as non-speech,
+    # and Whisper transcribes only the first few seconds (e.g. 11 s of a 178 s call).
     cmd_advanced = [
         "ffmpeg", "-y", "-i", str(input_path),
-        "-af", "highpass=f=80,lowpass=f=8000,speechnorm",
+        "-af", "highpass=f=80,lowpass=f=8000,loudnorm=I=-20:TP=-2:LRA=11",
         "-acodec", "pcm_s16le", "-ac", "1", "-ar", "16000",
         output_path
     ]
     
-    # Fallback 1: Use dynaudnorm instead of speechnorm if speechnorm filter is not supported.
+    # Fallback 1: Use dynaudnorm instead of loudnorm if loudnorm filter is not supported.
     cmd_dynaudnorm = [
         "ffmpeg", "-y", "-i", str(input_path),
         "-af", "highpass=f=80,lowpass=f=8000,dynaudnorm",

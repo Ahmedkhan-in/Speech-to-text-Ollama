@@ -10,7 +10,7 @@ Everything runs entirely on your local machine—no data ever leaves your comput
 
 - **🎙 Raw browser audio capture:** High-fidelity recording that bypasses WebRTC's compression and noise gates, ensuring clear voice data for Whisper.
 - **⚡ CPU-Optimized Inference:** Powered by `faster-whisper` (CTranslate2) with `int8` quantization and CPU thread tuning tailored to prevent hyperthreading contention.
-- **🧹 Advanced FFmpeg Preprocessing:** Clean audio signal containing filters for low-frequency rumble removal (highpass at 80Hz), high-frequency hiss removal (lowpass at 8000Hz), and dynamic speech-specific loudness normalization (`speechnorm` / `dynaudnorm`).
+- **🧹 Advanced FFmpeg Preprocessing:** Clean audio signal containing filters for low-frequency rumble removal (highpass at 80Hz), high-frequency hiss removal (lowpass at 8000Hz), and EBU R128 loudness normalization (`loudnorm`, falling back to `dynaudnorm`).
 - **🌐 Smart Urdu & English Auto-Detection:** Automatically runs a dual-language detection check. If speech is ambiguous or detected as Urdu, it transcribes both languages and selects the highest confidence result, resolving the standard English bias in default Whisper models.
 - **📊 Structured Summaries:** Extracts structured data matching a strict JSON schema (conversation type, participants, key points, action items, and sentiment) using Ollama and Gemma 3.
 
